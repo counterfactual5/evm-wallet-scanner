@@ -1,198 +1,83 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/EVM-Wallet--Scanner-blueviolet?style=for-the-badge&logo=ethereum" alt="EVM Wallet Scanner" />
+  <img src="https://img.shields.io/badge/EVM-Wallet--Scanner-4A90E2?style=for-the-badge&logo=ethereum&logoColor=white" alt="EVM Wallet Scanner" />
 </p>
 
 <h1 align="center">🔍 EVM Wallet Scanner</h1>
 
 <p align="center">
-  <strong>Zero-dependency EVM wallet scanner</strong><br/>
-  Balances · History · Transfers · Portfolio · Gas Reports · TX Status<br/>
-  <em>5 chains, pure Python, no web3.py, no Foundry</em>
+  <strong>轻量 · 零依赖 · 高性能</strong><br/>
+  纯 Python EVM 钱包扫描与分析工具包
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/pypi/pyversions/evm-wallet-scanner" alt="Python" />
-  <img src="https://img.shields.io/pypi/l/evm-wallet-scanner" alt="License" />
-  <img src="https://img.shields.io/github/actions/workflow/status/counterfactual5/evm-wallet-scanner/test.yml?branch=main" alt="CI" />
+  <a href="https://github.com/counterfactual5/evm-wallet-scanner/stargazers"><img src="https://img.shields.io/github/stars/counterfactual5/evm-wallet-scanner?style=social" alt="Stars"></a>
+  <img src="https://img.shields.io/badge/Python-3.9%2B-blue" alt="Python">
+  <img src="https://img.shields.io/badge/License-MIT-green" alt="License">
 </p>
 
 ---
 
-## ✨ Why EVM Wallet Scanner?
+## ✨ 项目亮点
 
-| Feature | EVM Wallet Scanner | web3.py | Manual Etherscan |
-|---------|:------------------:|:-------:|:----------------:|
-| **Zero dependencies** | ✅ | ❌ (heavy deps) | N/A |
-| **Pure Python stdlib** | ✅ | ❌ | N/A |
-| **Multi-chain balance query** | ✅ | Write it yourself | Tab hell |
-| **TX history (normal + internal + ERC20)** | ✅ | Write it yourself | Manual API calls |
-| **Counterparty analysis** | ✅ | ❌ | ❌ |
-| **Portfolio valuation** | ✅ | ❌ | ❌ |
-| **Gas reports by day** | ✅ | ❌ | ❌ |
-| **Transfer with dry-run** | ✅ | ✅ | ❌ |
-| **No API key required** (balance queries) | ✅ | ✅ | ❌ |
-| **Install size** | ~50 KB | ~10 MB | — |
+- **零依赖**：仅使用 Python 标准库，无需安装 web3.py、requests 等重型包
+- **多链支持**：Ethereum、Base、Arbitrum、Optimism、Polygon 等
+- **高性能**：异步支持 + 批量查询 + 智能 RPC 管理
+- **实用功能**：余额查询、交易历史、资金流分析、Gas 报告、Portfolio 估值
+- **CLI 友好**：可作为命令行工具快速使用
 
----
-
-## 🚀 Quick Start
+## 🚀 快速开始
 
 ```bash
-pip install evm-wallet-scanner
+# 克隆仓库
+git clone https://github.com/counterfactual5/evm-wallet-scanner.git
+cd evm-wallet-scanner
+
+# 直接运行示例
+python -m evm_wallet_scanner.example
 ```
 
-### Check a Balance (5 lines)
+### 示例：查询余额
 
 ```python
-from evm_wallet_scanner.common import build_balance_entry
+from evm_wallet_scanner.scanner import WalletScanner
 
-result = build_balance_entry(
-    chain_name="ethereum",
+scanner = WalletScanner()
+
+result = scanner.get_balance(
     wallet="0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
-    token_name=None,  # native ETH
-    token_decimals=None,
-    explicit_rpc_url=None,
+    chain="ethereum"
 )
-print(f"Balance: {result['humanBalance']} ETH")
+print(result)
 ```
 
-### Query Transaction History
+## 📋 核心功能
 
-```python
-from evm_wallet_scanner.common import etherscan_request, normalize_chain, require_etherscan_api_key
+| 功能模块 | 描述 |
+|----------|------|
+| **余额查询** | 原生代币 + ERC20 批量余额 |
+| **交易历史** | 普通交易 + 内部交易 + Token Transfer |
+| **资金流分析** | 对手方统计、鲸鱼追踪 |
+| **Portfolio** | 持仓估值 + Gas 消耗报告 |
+| **批量扫描** | 支持多地址、多链并行扫描 |
 
-chain = normalize_chain("base")
-api_key = require_etherscan_api_key()
-payload = etherscan_request(
-    chain_id=chain.chain_id,
-    module="account",
-    action="txlist",
-    api_key=api_key,
-    extra_params={"address": "0xYourWallet", "page": 1, "offset": 10, "sort": "desc"},
-)
-for tx in payload.get("result", []):
-    print(f"{tx['hash'][:16]}... value={tx['value']} wei")
-```
-
-### Multi-Chain Summary
-
-```python
-from evm_wallet_scanner.balances.wallet_multichain_summary import query_chain_assets
-
-result = query_chain_assets(
-    chain_name="ethereum",
-    wallet="0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
-    tokens=["USDC", "WETH", "USDT"],
-)
-for asset in result["assets"]:
-    print(f"{asset['symbol']}: {asset['humanBalance']}")
-```
-
----
-
-## 🏗 Architecture
-
-```
-┌──────────────────────────────────────────────────────┐
-│                   evm_wallet_scanner                  │
-├──────────┬──────────┬──────────┬──────────┬──────────┤
-│ balances │ history  │ transfer │ portfolio│  status  │
-│          │          │          │          │          │
-│ balance  │ history  │ transfer │ portfolio│ tx_status│
-│ overview │ report   │  (sign)  │ gas_rpt  │          │
-│ multi-   │ counter- │          │          │          │
-│ chain    │ parties  │          │          │          │
-├──────────┴──────────┴──────────┴──────────┴──────────┤
-│                    common / chains                     │
-│  ┌─────────────┐  ┌────────────┐  ┌──────────────┐  │
-│  │  JSON-RPC   │  │  Etherscan │  │  Formatting  │  │
-│  │  (urllib)   │  │  API v2    │  │  & Helpers   │  │
-│  └─────────────┘  └────────────┘  └──────────────┘  │
-└──────────────────────────────────────────────────────┘
-```
-
----
-
-## 📦 Modules
-
-| Module | Description |
-|--------|-------------|
-| `balances` | Single token balance, multi-token overview, multi-chain summary |
-| `history` | TX history (normal/internal/ERC20), transfer reports, counterparty analysis |
-| `transfer` | Native/ERC-20 transfers with dry-run, gas estimation, and optional signing |
-| `portfolio` | Portfolio valuation via Etherscan, gas spending reports by day |
-| `status` | Transaction receipt lookup and success checking |
-
----
-
-## ⛓ Supported Chains
-
-| Chain | Chain ID | Native | RPC |
-|-------|----------|--------|-----|
-| Ethereum | 1 | ETH | `eth.llamarpc.com` |
-| Base | 8453 | ETH | `mainnet.base.org` |
-| Arbitrum | 42161 | ETH | `arb1.arbitrum.io/rpc` |
-| Optimism | 10 | ETH | `mainnet.optimism.io` |
-| Polygon | 137 | MATIC | `polygon-rpc.com` |
-
-All chains also support custom RPC URLs via environment variables:
-```bash
-export ETH_RPC_URL=https://my-eth-node.example.com
-export BASE_RPC_URL=https://my-base-node.example.com
-```
-
----
-
-## 🔧 Environment Variables
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `ETHERSCAN_API_KEY` | History, Portfolio | Etherscan API v2 key |
-| `ETH_RPC_URL` / `RPC_URL` | Optional | Global RPC URL fallback |
-| `<CHAIN>_RPC_URL` | Optional | Chain-specific RPC (e.g. `BASE_RPC_URL`) |
-| `HOT_WALLET_PRIVATE_KEY` | Transfer (--broadcast) | Private key for signing |
-| `WALLET_ADDRESS` | Optional | Default wallet address |
-
----
-
-## 📋 CLI Usage
-
-Each module also works as a standalone CLI script:
+## 🛠 安装与开发
 
 ```bash
-# Balance query
-python -m evm_wallet_scanner.balances.wallet_balance --chain ethereum --wallet 0x... --token USDC
-
-# Transaction history
-python -m evm_wallet_scanner.history.wallet_history --chain base --wallet 0x... --kind normal --kind erc20
-
-# Multi-chain summary
-python -m evm_wallet_scanner.balances.wallet_multichain_summary --wallet 0x... --format table
-
-# Gas report
-python -m evm_wallet_scanner.portfolio.wallet_gas_report --chain ethereum --wallet 0x...
-
-# Transfer (dry-run)
-python -m evm_wallet_scanner.transfer.wallet_transfer --chain base --from 0x... --to 0x... --amount 0.01
+pip install -e .
 ```
 
----
+## 📌 支持链
 
-## 🧪 Development
-
-```bash
-# Install with dev dependencies
-pip install -e ".[dev]"
-
-# Run tests
-pytest
-
-# Lint
-ruff check src/
-```
-
----
+- Ethereum (1)
+- Base (8453)
+- Arbitrum (42161)
+- Optimism (10)
+- Polygon (137)
 
 ## 📄 License
 
-MIT License — see [LICENSE](LICENSE).
+MIT License
+
+---
+
+**Made with ❤️ for DeFi researchers and on-chain analysts**
