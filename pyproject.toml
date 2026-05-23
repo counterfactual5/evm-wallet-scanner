@@ -33,6 +33,13 @@ signer = ["eth-account>=0.10.0"]
 dev = ["pytest>=7.0", "pytest-cov", "ruff>=0.1.0"]
 all = ["eth-account>=0.10.0"]
 
+[project.urls]
+Repository = "https://github.com/counterfactual5/evm-wallet-scanner"
+Issues = "https://github.com/counterfactual5/evm-wallet-scanner/issues"
+
+[project.scripts]
+evm-scan = "evm_wallet_scanner.cli:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
