@@ -31,32 +31,6 @@ def _add_chain_wallet(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--wallet", required=True, help="Wallet address (0x...)")
 
 
-def _run_main(module_name: str, args: argparse.Namespace) -> None:
-    """Route a namespace to the matching argparse module, injecting args into sys.argv."""
-    import importlib
-
-    mod = importlib.import_module(f"evm_wallet_scanner.{module_name}")
-    # Rebuild argv from namespace for the module's own argparse parser
-    argv = sys.argv[:1]  # prog name
-    for key, val in vars(args).items():
-        if key in ("command", "func"):
-            continue
-        if val is None:
-            continue
-        if isinstance(val, bool):
-            if val:
-                argv.append(f"--{key.replace('_', '-')}")
-        elif isinstance(val, list):
-            for v in val:
-                argv.append(f"--{key.replace('_', '-')}")
-                argv.append(str(v))
-        else:
-            argv.append(f"--{key.replace('_', '-')}")
-            argv.append(str(val))
-    sys.argv = argv
-    mod.main()
-
-
 # ── main ────────────────────────────────────────────────────────────────────
 
 

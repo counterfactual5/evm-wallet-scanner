@@ -106,6 +106,8 @@ def main() -> None:
                 price_source = "etherscan"
 
                 token_value_usd = to_usd_value(token_balance_raw, token_decimals, token_price_usd)
+                if token_balance_raw > 0 and token_price_usd == 0:
+                    unpriced_token_count += 1
                 if not args.include_zero and token_balance_raw == 0:
                     continue
                 entry = {
