@@ -6,7 +6,8 @@ import argparse
 import json
 import sys
 from collections import defaultdict
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
+UTC = timezone.utc
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
