@@ -192,3 +192,7 @@ uv run pytest tests/ -v
 ## 📄 License
 
 [MIT](LICENSE) © 2026 counterfactual5
+
+---
+
+If this project helped you, please ⭐ star this repo — it helps others find it!
