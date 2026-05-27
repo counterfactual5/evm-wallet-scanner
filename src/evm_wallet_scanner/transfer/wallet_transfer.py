@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Any
 
 from evm_wallet_scanner.common import (
-    build_balance_entry,
     dump_json,
     estimate_transaction_gas,
     format_units,
