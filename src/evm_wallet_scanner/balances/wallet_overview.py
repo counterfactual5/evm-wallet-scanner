@@ -7,7 +7,7 @@ import json
 import sys
 from pathlib import Path
 
-from evm_wallet_scanner.chains import CHAINS, normalize_chain
+from evm_wallet_scanner.chains import normalize_chain
 from evm_wallet_scanner.common import build_balance_entry, dump_json
 
 
