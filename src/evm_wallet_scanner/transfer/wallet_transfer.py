@@ -126,7 +126,6 @@ def sign_and_broadcast(
     """Sign a transaction with eth-account and broadcast via eth_sendRawTransaction."""
     try:
         from eth_account import Account
-        from eth_account.transactions import TypedTransaction
     except ImportError:
         raise ImportError(
             "eth-account is required for signing transactions. "
