@@ -14,6 +14,13 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
+from evm_wallet_scanner.audit import (
+    EVENT_BROADCAST,
+    EVENT_CONFIRM,
+    EVENT_ERROR,
+    EVENT_SIGN,
+    log_event,
+)
 from evm_wallet_scanner.common import (
     dump_json,
     estimate_transaction_gas,
@@ -326,6 +333,18 @@ def main(args: argparse.Namespace | None = None) -> None:
             pre_broadcast = capture_balances(sender=sender, receiver=receiver, token=token, rpc_url=rpc_url)
             private_key, pk_source = resolve_private_key(args.private_key)
             response["signer"] = {"backend": "eth-account", "source": pk_source}
+            log_event(
+                event=EVENT_SIGN,
+                chain=chain.key,
+                wallet=sender,
+                details={
+                    "to": tx_fields["to"],
+                    "rawAmount": str(raw_amount),
+                    "asset": token.get("symbol"),
+                    "gasLimit": estimated_gas,
+                    "gasPriceWei": str(gas_price),
+                },
+            )
             broadcast_result = sign_and_broadcast(
                 tx_fields=tx_fields, chain_id=chain.chain_id,
                 gas_limit=estimated_gas, gas_price=gas_price,
@@ -333,6 +352,17 @@ def main(args: argparse.Namespace | None = None) -> None:
             )
             response["broadcastResult"] = broadcast_result
             tx_hash = broadcast_result.get("transactionHash", "")
+            log_event(
+                event=EVENT_BROADCAST,
+                chain=chain.key,
+                wallet=sender,
+                tx_hash=tx_hash or None,
+                details={
+                    "to": tx_fields["to"],
+                    "rawAmount": str(raw_amount),
+                    "asset": token.get("symbol"),
+                },
+            )
             if tx_hash:
                 response["transactionHash"] = tx_hash
                 receipt = wait_for_transaction_receipt(
@@ -348,6 +378,17 @@ def main(args: argparse.Namespace | None = None) -> None:
                     "after": {k: str(v) for k, v in after.items()},
                     "delta": {k: str(after[k] - pre_broadcast[k]) for k in pre_broadcast},
                 }
+                log_event(
+                    event=EVENT_CONFIRM,
+                    chain=chain.key,
+                    wallet=sender,
+                    tx_hash=tx_hash,
+                    error_code=None if response["success"] else "receipt_failed",
+                    details={
+                        "confirmations": max(1, int(args.receipt_confirmations)),
+                        "status": receipt.get("status"),
+                    },
+                )
         else:
             response["note"] = "dry-run only; pass --broadcast with --confirm to send"
 
@@ -357,6 +398,13 @@ def main(args: argparse.Namespace | None = None) -> None:
             )
         dump_json(response)
     except Exception as exc:
+        log_event(
+            event=EVENT_ERROR,
+            chain=getattr(args, "chain", None),
+            wallet=getattr(args, "sender", None),
+            error_code=type(exc).__name__,
+            details={"message": str(exc), "action": "wallet_transfer"},
+        )
         print(json.dumps({"error": str(exc)}, ensure_ascii=False, indent=2), file=sys.stderr)
         sys.exit(1)
 

@@ -13,6 +13,7 @@ import sys
 
 from evm_wallet_scanner import __version__
 from evm_wallet_scanner.balances import balance_main, multichain_main, overview_main
+from evm_wallet_scanner.doctor.cli import doctor_main
 from evm_wallet_scanner.history import counterparties_main, history_main, transfer_report_main
 from evm_wallet_scanner.portfolio import gas_report_main, portfolio_main
 from evm_wallet_scanner.status import tx_status_main
@@ -113,6 +114,24 @@ def main() -> None:
     p.add_argument("--end-block", default="9999999999")
     p.add_argument("--output", help="Write JSON output to file")
     p.set_defaults(func=lambda a: gas_report_main())
+
+    # ── doctor ──
+    p = sub.add_parser(
+        "doctor",
+        help="Preflight health check (RPC / balance / nonce / gas / allowance / signer)",
+    )
+    p.add_argument("--chain", required=True, help="Chain key")
+    p.add_argument("--wallet", required=True, help="Wallet address")
+    p.add_argument("--token", dest="token_address", help="Optional ERC-20 token to inspect")
+    p.add_argument("--spender", help="Spender address (requires --token)")
+    p.add_argument("--required-allowance-raw", default="0")
+    p.add_argument("--min-native-wei", default=str(5 * 10**14))
+    p.add_argument("--min-token-balance-raw", default="0")
+    p.add_argument("--signer-env", action="append", dest="signer_envs")
+    p.add_argument("--rpc-url", help="Override RPC URL")
+    p.add_argument("--output", help="Write JSON report to file")
+    p.add_argument("--exit-code", action="store_true")
+    p.set_defaults(func=lambda a: sys.exit(doctor_main(sys.argv[2:])))
 
     # ── tx-status ──
     p = sub.add_parser("tx-status", help="Check transaction status")
