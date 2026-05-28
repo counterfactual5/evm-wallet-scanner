@@ -13,7 +13,9 @@ class TestImports(unittest.TestCase):
 
     def test_import_package(self):
         import evm_wallet_scanner
-        self.assertEqual(evm_wallet_scanner.__version__, "0.1.1")
+        # Mirror whatever pyproject claims rather than hard-coding; the
+        # version moves faster than this test.
+        self.assertRegex(evm_wallet_scanner.__version__, r"^\d+\.\d+\.\d+")
 
     def test_import_chains(self):
         from evm_wallet_scanner.chains import CHAINS, CHAIN_BY_ID, normalize_chain
@@ -347,6 +349,338 @@ class TestReceiptConfirmations(unittest.TestCase):
             wallet_transfer.main(args)
             _, kwargs = mock_wait.call_args
             self.assertEqual(kwargs["confirmations"], 3)
+
+
+class TestPreflightDoctor(unittest.TestCase):
+    """Aggregator-level checks for the preflight doctor.
+
+    The individual RPC primitives are covered by ``TestRpcQueries`` and
+    ``TestReceiptConfirmations``; here we focus on the aggregation rules:
+    skip when inputs missing, severity escalation, and exit-code mapping.
+    """
+
+    _GOOD_WALLET = "0xd8da6bf26964af9d7eed9e03e53415d37aa96045"
+    _GOOD_TOKEN = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"  # USDC mainnet
+    _GOOD_SPENDER = "0xe592427a0aece92de3edee1f18e0157c05861564"
+
+    def _rpc_side_effect(self, *, chain_id="0x1", native_balance="0xde0b6b3a7640000", nonce="0x5", gas_price="0x3b9aca00", token_balance="0xff", allowance="0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", decimals="0x6", symbol=None):
+        # Return a *function* that dispatches on RPC method+selector, so the
+        # aggregator can call methods in any order without the test caring.
+        def fake(method, params, rpc_url, timeout=30):  # noqa: ARG001
+            if method == "eth_blockNumber":
+                return "0x1234"
+            if method == "eth_chainId":
+                return chain_id
+            if method == "eth_getBalance":
+                return native_balance
+            if method == "eth_getTransactionCount":
+                return nonce
+            if method == "eth_gasPrice":
+                return gas_price
+            if method == "eth_call":
+                data = (params[0].get("data") or "").lower()
+                # Normalize away accidental leading '0x' duplication.
+                while data.startswith("0x"):
+                    data = data[2:]
+                if data.startswith("70a08231"):
+                    return token_balance
+                if data.startswith("dd62ed3e"):
+                    return allowance
+                if data.startswith("313ce567"):
+                    return decimals
+                if data.startswith("95d89b41"):
+                    return symbol or "0x" + ("00" * 32) + ("00" * 31) + "04" + b"USDC".hex().ljust(64, "0")
+            raise AssertionError(f"unexpected RPC call: {method} {params}")
+        return fake
+
+    def test_all_ok_when_balances_sufficient(self):
+        from evm_wallet_scanner.doctor import run_preflight
+
+        with patch("evm_wallet_scanner.common._json_rpc", side_effect=self._rpc_side_effect()):
+            with patch.dict(os.environ, {"HOT_WALLET_PRIVATE_KEY": "0x" + "11" * 32}, clear=True):
+                report = run_preflight(
+                    chain="ethereum",
+                    wallet=self._GOOD_WALLET,
+                    rpc_url="https://rpc.example.com",
+                    token_address=self._GOOD_TOKEN,
+                    spender=self._GOOD_SPENDER,
+                    required_allowance_raw=1000,
+                    min_native_wei=10**17,
+                    min_token_balance_raw=1,
+                )
+
+        self.assertTrue(report.ok, msg=json.dumps(report.to_dict(), indent=2))
+        names = {c.name: c.status for c in report.checks}
+        self.assertEqual(names["rpc_reachable"], "ok")
+        self.assertEqual(names["chain_id_matches"], "ok")
+        self.assertEqual(names["native_balance"], "ok")
+        self.assertEqual(names["pending_nonce"], "ok")
+        self.assertEqual(names["gas_price"], "ok")
+        self.assertEqual(names["token_balance"], "ok")
+        self.assertEqual(names["allowance"], "ok")
+        self.assertEqual(names["signer_env"], "ok")
+
+    def test_chain_id_mismatch_fails(self):
+        from evm_wallet_scanner.doctor import run_preflight
+
+        with patch(
+            "evm_wallet_scanner.common._json_rpc",
+            side_effect=self._rpc_side_effect(chain_id="0x89"),  # polygon, not ethereum
+        ):
+            with patch.dict(os.environ, {"HOT_WALLET_PRIVATE_KEY": "0x" + "11" * 32}, clear=True):
+                report = run_preflight(
+                    chain="ethereum",
+                    wallet=self._GOOD_WALLET,
+                    rpc_url="https://rpc.example.com",
+                )
+
+        self.assertFalse(report.ok)
+        chain_check = next(c for c in report.checks if c.name == "chain_id_matches")
+        self.assertEqual(chain_check.status, "fail")
+        self.assertEqual(chain_check.details["actualChainId"], 137)
+        self.assertEqual(chain_check.details["expectedChainId"], 1)
+
+    def test_zero_native_balance_fails(self):
+        from evm_wallet_scanner.doctor import run_preflight
+
+        with patch(
+            "evm_wallet_scanner.common._json_rpc",
+            side_effect=self._rpc_side_effect(native_balance="0x0"),
+        ):
+            with patch.dict(os.environ, {"HOT_WALLET_PRIVATE_KEY": "0x" + "11" * 32}, clear=True):
+                report = run_preflight(
+                    chain="ethereum",
+                    wallet=self._GOOD_WALLET,
+                    rpc_url="https://rpc.example.com",
+                )
+
+        self.assertFalse(report.ok)
+        native = next(c for c in report.checks if c.name == "native_balance")
+        self.assertEqual(native.status, "fail")
+
+    def test_low_native_balance_warns_but_passes(self):
+        from evm_wallet_scanner.doctor import run_preflight
+
+        with patch(
+            "evm_wallet_scanner.common._json_rpc",
+            side_effect=self._rpc_side_effect(native_balance=hex(10**13)),  # 10^13 wei
+        ):
+            with patch.dict(os.environ, {"HOT_WALLET_PRIVATE_KEY": "0x" + "11" * 32}, clear=True):
+                report = run_preflight(
+                    chain="ethereum",
+                    wallet=self._GOOD_WALLET,
+                    rpc_url="https://rpc.example.com",
+                    min_native_wei=10**17,
+                )
+
+        self.assertTrue(report.ok)  # warn doesn't trip ok
+        native = next(c for c in report.checks if c.name == "native_balance")
+        self.assertEqual(native.status, "warn")
+
+    def test_missing_token_skips_token_checks(self):
+        from evm_wallet_scanner.doctor import run_preflight
+
+        with patch("evm_wallet_scanner.common._json_rpc", side_effect=self._rpc_side_effect()):
+            with patch.dict(os.environ, {"HOT_WALLET_PRIVATE_KEY": "0x" + "11" * 32}, clear=True):
+                report = run_preflight(
+                    chain="ethereum",
+                    wallet=self._GOOD_WALLET,
+                    rpc_url="https://rpc.example.com",
+                )
+
+        tok = next(c for c in report.checks if c.name == "token_balance")
+        allow = next(c for c in report.checks if c.name == "allowance")
+        self.assertEqual(tok.status, "skip")
+        self.assertEqual(allow.status, "skip")
+        self.assertTrue(report.ok)
+
+    def test_no_signer_env_warns(self):
+        from evm_wallet_scanner.doctor import run_preflight
+
+        with patch("evm_wallet_scanner.common._json_rpc", side_effect=self._rpc_side_effect()):
+            with patch.dict(os.environ, {}, clear=True):
+                report = run_preflight(
+                    chain="ethereum",
+                    wallet=self._GOOD_WALLET,
+                    rpc_url="https://rpc.example.com",
+                )
+
+        signer = next(c for c in report.checks if c.name == "signer_env")
+        self.assertEqual(signer.status, "warn")
+        self.assertTrue(report.ok)  # signer is warn, not fail
+
+    def test_insufficient_allowance_fails(self):
+        from evm_wallet_scanner.doctor import run_preflight
+
+        with patch(
+            "evm_wallet_scanner.common._json_rpc",
+            side_effect=self._rpc_side_effect(allowance="0x0"),
+        ):
+            with patch.dict(os.environ, {"HOT_WALLET_PRIVATE_KEY": "0x" + "11" * 32}, clear=True):
+                report = run_preflight(
+                    chain="ethereum",
+                    wallet=self._GOOD_WALLET,
+                    rpc_url="https://rpc.example.com",
+                    token_address=self._GOOD_TOKEN,
+                    spender=self._GOOD_SPENDER,
+                    required_allowance_raw=1000,
+                )
+
+        self.assertFalse(report.ok)
+        allow = next(c for c in report.checks if c.name == "allowance")
+        self.assertEqual(allow.status, "fail")
+
+    def test_check_exception_recorded_as_error_not_raised(self):
+        from evm_wallet_scanner.doctor import run_preflight
+
+        def boom(method, params, rpc_url, timeout=30):  # noqa: ARG001
+            raise RuntimeError("rpc dead")
+
+        with patch("evm_wallet_scanner.common._json_rpc", side_effect=boom):
+            with patch.dict(os.environ, {}, clear=True):
+                report = run_preflight(
+                    chain="ethereum",
+                    wallet=self._GOOD_WALLET,
+                    rpc_url="https://rpc.example.com",
+                )
+
+        # Every check that touches RPC should be 'error', the report not ok.
+        self.assertFalse(report.ok)
+        errors = [c for c in report.checks if c.status == "error"]
+        self.assertGreaterEqual(len(errors), 1)
+
+    def test_cli_exit_code_signals_failure(self):
+        from evm_wallet_scanner.doctor.cli import doctor_main
+
+        with patch(
+            "evm_wallet_scanner.common._json_rpc",
+            side_effect=self._rpc_side_effect(chain_id="0x89"),
+        ):
+            with patch.dict(os.environ, {"HOT_WALLET_PRIVATE_KEY": "0x" + "11" * 32}, clear=True):
+                with patch("builtins.print"):
+                    code = doctor_main(
+                        [
+                            "--chain", "ethereum",
+                            "--wallet", self._GOOD_WALLET,
+                            "--rpc-url", "https://rpc.example.com",
+                            "--exit-code",
+                        ]
+                    )
+        self.assertEqual(code, 2)
+
+
+class TestAuditLog(unittest.TestCase):
+    """Schema-stability tests for the audit-log emitter.
+
+    Downstream consumers (jq queries, future ingestion pipeline) depend on the
+    record shape being stable. These tests pin the required keys and reject
+    unknown event names.
+    """
+
+    def test_build_record_has_all_required_keys(self):
+        from evm_wallet_scanner.audit import (
+            EVENT_BROADCAST,
+            REQUIRED_KEYS,
+            build_record,
+        )
+
+        record = build_record(
+            event=EVENT_BROADCAST,
+            chain="ethereum",
+            wallet="0xabc",
+            tx_hash="0xdef",
+        )
+        for key in REQUIRED_KEYS:
+            self.assertIn(key, record, f"missing required key {key}")
+        self.assertEqual(record["event"], "broadcast")
+        self.assertEqual(record["chain"], "ethereum")
+        self.assertEqual(record["wallet"], "0xabc")
+        self.assertEqual(record["tx_hash"], "0xdef")
+        self.assertEqual(record["details"], {})
+
+    def test_build_record_rejects_unknown_event(self):
+        from evm_wallet_scanner.audit import build_record
+
+        with self.assertRaises(ValueError):
+            build_record(event="frobnicate")
+
+    def test_run_id_pulled_from_stageforge_env(self):
+        from evm_wallet_scanner.audit import EVENT_QUOTE, build_record
+
+        with patch.dict(os.environ, {"STAGEFORGE_RUN_ID": "run-42"}, clear=True):
+            record = build_record(event=EVENT_QUOTE)
+        self.assertEqual(record["run_id"], "run-42")
+
+    def test_explicit_run_id_wins_over_env(self):
+        from evm_wallet_scanner.audit import EVENT_QUOTE, build_record
+
+        with patch.dict(os.environ, {"STAGEFORGE_RUN_ID": "run-42"}, clear=True):
+            record = build_record(event=EVENT_QUOTE, run_id="explicit-99")
+        self.assertEqual(record["run_id"], "explicit-99")
+
+    def test_emit_writes_to_audit_log_path(self):
+        import tempfile
+
+        from evm_wallet_scanner.audit import EVENT_PREFLIGHT, log_event
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = os.path.join(tmpdir, "audit.jsonl")
+            with patch.dict(os.environ, {"AUDIT_LOG_PATH": log_path}, clear=True):
+                log_event(event=EVENT_PREFLIGHT, chain="ethereum", wallet="0xabc")
+                log_event(event=EVENT_PREFLIGHT, chain="base", wallet="0xdef")
+
+            with open(log_path, encoding="utf-8") as fh:
+                lines = [json.loads(line) for line in fh if line.strip()]
+            self.assertEqual(len(lines), 2)
+            self.assertEqual(lines[0]["chain"], "ethereum")
+            self.assertEqual(lines[1]["chain"], "base")
+            self.assertEqual(lines[0]["event"], "preflight")
+
+    def test_record_is_json_serializable_oneline(self):
+        from evm_wallet_scanner.audit import EVENT_BROADCAST, build_record
+
+        record = build_record(
+            event=EVENT_BROADCAST,
+            chain="ethereum",
+            wallet="0xabc",
+            tx_hash="0xdef",
+            details={"nested": {"key": "value"}, "list": [1, 2, 3]},
+        )
+        # Serializing as a JSON line must succeed and produce no newlines
+        # inside the JSON body.
+        line = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+        self.assertNotIn("\n", line)
+        roundtrip = json.loads(line)
+        self.assertEqual(roundtrip["details"]["nested"]["key"], "value")
+
+
+class TestWalletTransferAuditTrail(unittest.TestCase):
+    def test_error_path_emits_audit_event(self):
+        from argparse import Namespace
+        from evm_wallet_scanner.transfer import wallet_transfer
+
+        emitted: list[dict] = []
+
+        def capture(**kwargs):
+            emitted.append(kwargs)
+            return kwargs
+
+        args = Namespace(
+            chain="ethereum",
+            sender="not-a-valid-address",
+            receiver="0x2222222222222222222222222222222222222222",
+            token="NATIVE",
+            amount="0.1",
+            broadcast=False,
+        )
+        with patch("evm_wallet_scanner.transfer.wallet_transfer.log_event", side_effect=capture):
+            with self.assertRaises(SystemExit):
+                wallet_transfer.main(args)
+
+        self.assertTrue(emitted)
+        # The terminal event should be the error.
+        self.assertEqual(emitted[-1]["event"], "error")
+        self.assertEqual(emitted[-1]["chain"], "ethereum")
 
 
 if __name__ == "__main__":

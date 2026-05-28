@@ -135,14 +135,14 @@ def query_native_balance(address: str, rpc_url: str) -> int:
 def query_erc20_balance(owner: str, token: str, rpc_url: str) -> int:
     """Query ERC-20 balanceOf via eth_call."""
     data = _SELECTOR_BALANCE_OF + _encode_address(owner)
-    result = _json_rpc("eth_call", [{"to": token, "data": "0x" + data}, "latest"], rpc_url)
+    result = _json_rpc("eth_call", [{"to": token, "data": data}, "latest"], rpc_url)
     return _decode_int(result)
 
 
 def query_erc20_allowance(token: str, owner: str, spender: str, rpc_url: str) -> int:
     """Query ERC-20 allowance via eth_call."""
     data = _SELECTOR_ALLOWANCE + _encode_address(owner) + _encode_address(spender)
-    result = _json_rpc("eth_call", [{"to": token, "data": "0x" + data}, "latest"], rpc_url)
+    result = _json_rpc("eth_call", [{"to": token, "data": data}, "latest"], rpc_url)
     return _decode_int(result)
 
 
