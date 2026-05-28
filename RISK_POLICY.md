@@ -89,7 +89,7 @@ Activated via `check_polymarket(policy, context)`.
 |------|-----|----------|-------------|
 | Min price | `min_price` | **Hard reject** | Order price < floor → blocked. |
 | Max price | `max_price` | **Hard reject** | Order price > ceiling → blocked. |
-| Max position | `max_position_value` | **Hard reject** | Total position value > cap → blocked. |
+| Max position | `max_position_value` | **Hard reject** | Per-order notional (`price × size`, in USDC) > cap → blocked. Does not aggregate existing positions. |
 
 ```yaml
 polymarket-autopilot:
@@ -150,4 +150,70 @@ with `details.violations` containing the list of failed rules:
     ]
   }
 }
+```
+
+Soft warnings (whitelist miss, high gas price) do **not** block the trade but
+are recorded as a `preflight` event so they remain visible:
+
+```json
+{
+  "event": "preflight",
+  "details": {
+    "stage": "policy",
+    "warnings": [
+      {"rule": "max_gas_price_gwei", "message": "gas price 120 gwei exceeds soft limit 100 gwei"}
+    ]
+  }
+}
+```
+
+## Anti-Replay & Resume Drill
+
+Run this 4-step drill per project before trusting the state machine in
+production.  It verifies that a re-run with the same `run_id` never
+double-broadcasts and that policy rejection lands in a terminal state.
+
+```bash
+export STAGEFORGE_STATE_DIR=/tmp/sf-drill        # isolate from real state
+export AUDIT_LOG_PATH=/tmp/sf-drill/audit.jsonl
+export AUDIT_RUN_ID=drill-001                     # pin a fixed run id
+```
+
+1. **First execution** — run the normal trade path. Confirm the state file
+   reaches `broadcast` (or `confirmed`):
+
+   ```bash
+   cat "$STAGEFORGE_STATE_DIR/drill-001.json" | python3 -c "import json,sys; print(json.load(sys.stdin)['current_state'])"
+   ```
+
+2. **Replay (same run_id)** — run the exact same command again. The trade must
+   return `already_broadcast` / `already_confirmed` and **must not** call the
+   broadcast / order API a second time. Confirm no new `broadcast` line was
+   appended to the audit log.
+
+3. **Policy rejection** — bump the trade amount above `max_amount` (or set a
+   blacklist hit) with a fresh `AUDIT_RUN_ID=drill-002`. Confirm:
+   - `error_code="policy_rejected"` appears in the audit log
+   - state file `drill-002.json` is in `failed` (terminal)
+
+4. **Correlation** — verify the `run_id` in the state file matches the `run_id`
+   on every audit line for that run:
+
+   ```bash
+   jq -r 'select(.run_id=="drill-001") | "\(.event)\t\(.run_id)"' "$AUDIT_LOG_PATH"
+   ```
+
+Clean up with `rm -rf /tmp/sf-drill`.
+
+## Auditing All Runs
+
+A shared summary script lives at `scripts/audit_summary.py` (identical across
+the four trading projects):
+
+```bash
+# Event counts + rejection/warning breakdown for a log file
+python3 scripts/audit_summary.py /tmp/sf-drill/audit.jsonl
+
+# Read from stdin
+cat audit.jsonl | python3 scripts/audit_summary.py -
 ```

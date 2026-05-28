@@ -21,6 +21,7 @@ from evm_wallet_scanner.audit import (
     EVENT_BROADCAST,
     EVENT_CONFIRM,
     EVENT_ERROR,
+    EVENT_PREFLIGHT,
     EVENT_SIGN,
     log_event,
 )
@@ -393,6 +394,13 @@ def main(args: argparse.Namespace | None = None) -> None:
                 )
                 raise RuntimeError(
                     f"Policy rejected: {'; '.join(v.message for v in policy_result.violations)}"
+                )
+            if policy_result.warnings:
+                log_event(
+                    event=EVENT_PREFLIGHT,
+                    chain=chain.key,
+                    wallet=sender,
+                    details={"stage": "policy", "warnings": policy_result.to_dict()["warnings"]},
                 )
 
             pre_broadcast = capture_balances(sender=sender, receiver=receiver, token=token, rpc_url=rpc_url)
