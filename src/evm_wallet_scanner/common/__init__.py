@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
@@ -200,6 +201,49 @@ def get_transaction_receipt(tx_hash: str, rpc_url: str) -> dict[str, Any]:
     if result is None:
         raise RuntimeError(f"Receipt not found for tx {tx_hash}")
     return result
+
+
+def wait_for_transaction_receipt(
+    tx_hash: str,
+    rpc_url: str,
+    *,
+    confirmations: int = 1,
+    poll_interval: float = 2.0,
+    timeout_seconds: float = 300.0,
+) -> dict[str, Any]:
+    """Wait for a tx receipt and requested confirmation depth.
+
+    ``confirmations=1`` means "mined". For N>1 we wait until:
+    ``head_block - receipt_block + 1 >= confirmations``.
+    """
+    if confirmations < 1:
+        confirmations = 1
+    deadline = time.monotonic() + timeout_seconds
+    receipt: dict[str, Any] | None = None
+    while time.monotonic() < deadline:
+        maybe = _json_rpc("eth_getTransactionReceipt", [tx_hash], rpc_url)
+        if maybe is not None:
+            receipt = maybe
+            break
+        time.sleep(poll_interval)
+    if receipt is None:
+        raise RuntimeError(f"Receipt not found for tx {tx_hash} within {timeout_seconds}s")
+    if confirmations == 1:
+        return receipt
+    block_raw = receipt.get("blockNumber")
+    if block_raw is None:
+        return receipt
+    receipt_block = _decode_int(block_raw)
+    while time.monotonic() < deadline:
+        head_raw = _json_rpc("eth_blockNumber", [], rpc_url)
+        head = _decode_int(head_raw)
+        if head - receipt_block + 1 >= confirmations:
+            return receipt
+        time.sleep(poll_interval)
+    raise RuntimeError(
+        f"Tx {tx_hash} mined at block {receipt_block} but did not reach "
+        f"{confirmations} confirmations within {timeout_seconds}s"
+    )
 
 
 def receipt_succeeded(receipt: dict[str, Any]) -> bool:
