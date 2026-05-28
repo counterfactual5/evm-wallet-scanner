@@ -36,8 +36,15 @@ uniswap-autopilot:
 ```
 
 Project sections merge on top of `global`.  Non-null values override;
-non-overridden fields inherit from global.  Empty `[]` lists count as
-non-null overrides — they **disable** the check, not skip it.
+non-overridden fields inherit from global.  Two edge cases worth knowing:
+
+- **`allowed_chains: []`** — empty list disables the chain check (all chains
+  pass).  This is different from omitting the field (inherits global list).
+- **`blacklist_addresses: []`** — empty list means no addresses are blocked
+  (check runs, nothing matches).
+
+In short: an empty list always means "no restriction on this field", never
+"block all".
 
 ## Shared Rules (all projects)
 
