@@ -244,5 +244,110 @@ class TestEtherscanRequest(unittest.TestCase):
         self.assertEqual(result["result"], [])
 
 
+class TestTransferNonceHandling(unittest.TestCase):
+    """Regression: signer must convert hex-string nonce → int."""
+
+    def test_fetch_pending_nonce_decodes_hex(self):
+        from evm_wallet_scanner.transfer.wallet_transfer import _fetch_pending_nonce
+
+        with patch("evm_wallet_scanner.transfer.wallet_transfer._json_rpc") as mock_rpc:
+            mock_rpc.return_value = "0x2a"  # 42
+            self.assertEqual(_fetch_pending_nonce("0xabc", "https://rpc.example.com"), 42)
+            args, _ = mock_rpc.call_args
+            self.assertEqual(args[0], "eth_getTransactionCount")
+            self.assertEqual(args[1], ["0xabc", "pending"])
+
+    def test_fetch_pending_nonce_accepts_int(self):
+        from evm_wallet_scanner.transfer.wallet_transfer import _fetch_pending_nonce
+
+        with patch("evm_wallet_scanner.transfer.wallet_transfer._json_rpc") as mock_rpc:
+            mock_rpc.return_value = 7
+            self.assertEqual(_fetch_pending_nonce("0xabc", "https://rpc.example.com"), 7)
+
+    def test_fetch_pending_nonce_rejects_invalid(self):
+        from evm_wallet_scanner.transfer.wallet_transfer import _fetch_pending_nonce
+
+        with patch("evm_wallet_scanner.transfer.wallet_transfer._json_rpc") as mock_rpc:
+            mock_rpc.return_value = None
+            with self.assertRaises(RuntimeError):
+                _fetch_pending_nonce("0xabc", "https://rpc.example.com")
+
+
+class TestTransferArgCoercion(unittest.TestCase):
+    """Regression: ``transfer_main`` accepts a partial namespace from cli.py."""
+
+    def test_coerce_args_fills_defaults(self):
+        from argparse import Namespace
+        from evm_wallet_scanner.transfer.wallet_transfer import _coerce_args
+
+        partial = Namespace(chain="ethereum", sender="0xa", receiver="0xb", token="NATIVE")
+        coerced = _coerce_args(partial)
+        self.assertFalse(coerced.broadcast)
+        self.assertIsNone(coerced.confirm)
+        self.assertFalse(coerced.send_all)
+        self.assertEqual(coerced.receipt_confirmations, 1)
+
+
+class TestReceiptConfirmations(unittest.TestCase):
+    def test_wait_for_transaction_receipt_respects_confirmations(self):
+        from evm_wallet_scanner.common import wait_for_transaction_receipt
+
+        with patch("evm_wallet_scanner.common._json_rpc") as mock_rpc, patch("evm_wallet_scanner.common.time.sleep"):
+            # First call: eth_getTransactionReceipt -> mined at block 0x10
+            # Then two head polls: 0x10 (1 conf) then 0x11 (2 conf) => done for confirmations=2
+            mock_rpc.side_effect = [
+                {"blockNumber": "0x10", "status": "0x1"},
+                "0x10",
+                "0x11",
+            ]
+            receipt = wait_for_transaction_receipt(
+                "0xabc",
+                "https://rpc.example.com",
+                confirmations=2,
+                poll_interval=0,
+                timeout_seconds=1,
+            )
+            self.assertEqual(receipt["status"], "0x1")
+
+    def test_wallet_transfer_uses_receipt_confirmations_argument(self):
+        from argparse import Namespace
+        from evm_wallet_scanner.transfer import wallet_transfer
+
+        args = Namespace(
+            chain="ethereum",
+            sender="0x1111111111111111111111111111111111111111",
+            receiver="0x2222222222222222222222222222222222222222",
+            token="NATIVE",
+            token_address=None,
+            token_decimals=None,
+            amount="0.1",
+            amount_raw=None,
+            send_all=False,
+            rpc_url="https://rpc.example.com",
+            gas_limit=None,
+            gas_price="1",
+            private_key="0x" + "11" * 32,
+            broadcast=True,
+            confirm="TRANSFER ethereum ETH 0.1 TO 0x2222222222222222222222222222222222222222",
+            receipt_confirmations=3,
+            output=None,
+        )
+
+        with (
+            patch("evm_wallet_scanner.transfer.wallet_transfer.normalize_chain") as mock_chain,
+            patch("evm_wallet_scanner.transfer.wallet_transfer.resolve_rpc_url", return_value=("https://rpc.example.com", [])),
+            patch("evm_wallet_scanner.transfer.wallet_transfer.resolve_transfer_token", return_value={"symbol": "ETH", "address": "NATIVE", "decimals": 18}),
+            patch("evm_wallet_scanner.transfer.wallet_transfer.query_native_balance", return_value=10**19),
+            patch("evm_wallet_scanner.transfer.wallet_transfer.estimate_transaction_gas", return_value=21000),
+            patch("evm_wallet_scanner.transfer.wallet_transfer.sign_and_broadcast", return_value={"transactionHash": "0xabc"}),
+            patch("evm_wallet_scanner.transfer.wallet_transfer.wait_for_transaction_receipt", return_value={"status": "0x1"}) as mock_wait,
+            patch("evm_wallet_scanner.transfer.wallet_transfer.dump_json"),
+        ):
+            mock_chain.return_value = type("Chain", (), {"key": "ethereum", "chain_id": 1})()
+            wallet_transfer.main(args)
+            _, kwargs = mock_wait.call_args
+            self.assertEqual(kwargs["confirmations"], 3)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -18,7 +18,7 @@ from evm_wallet_scanner.common import (
     dump_json,
     estimate_transaction_gas,
     format_units,
-    get_transaction_receipt,
+    wait_for_transaction_receipt,
     normalize_chain,
     query_erc20_balance,
     query_gas_price,
@@ -114,6 +114,21 @@ def capture_balances(
     }
 
 
+def _fetch_pending_nonce(address: str, rpc_url: str) -> int:
+    """Return the next nonce for ``address`` as an int.
+
+    Uses the ``pending`` tag so a freshly-broadcast tx in the mempool is not
+    skipped. ``eth_getTransactionCount`` returns a hex string over JSON-RPC,
+    which ``eth-account`` will reject if passed through unconverted.
+    """
+    raw = _json_rpc("eth_getTransactionCount", [address, "pending"], rpc_url)
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str):
+        return int(raw, 0)
+    raise RuntimeError(f"eth_getTransactionCount returned unexpected value: {raw!r}")
+
+
 def sign_and_broadcast(
     *,
     tx_fields: dict[str, str],
@@ -134,14 +149,13 @@ def sign_and_broadcast(
 
     account = Account.from_key(private_key)
 
-    # Build EIP-1559 or legacy transaction
     tx: dict[str, Any] = {
         "to": tx_fields["to"],
         "value": int(tx_fields["value"]),
         "gas": gas_limit,
         "gasPrice": gas_price,
         "data": tx_fields["data"],
-        "nonce": _json_rpc("eth_getTransactionCount", [account.address, "latest"], rpc_url),
+        "nonce": _fetch_pending_nonce(account.address, rpc_url),
         "chainId": chain_id,
     }
 
@@ -152,7 +166,7 @@ def sign_and_broadcast(
     return {"transactionHash": tx_hash}
 
 
-def parse_args() -> argparse.Namespace:
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="EVM wallet transfer (dry-run by default)")
     parser.add_argument("--chain", required=True, help="chain name")
     parser.add_argument("--from", dest="sender", required=True, help="sender address")
@@ -172,11 +186,48 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--confirm", help="must match confirmation phrase to broadcast")
     parser.add_argument("--receipt-confirmations", type=int, default=1)
     parser.add_argument("--output", help="write JSON output to file")
-    return parser.parse_args()
+    return parser
 
 
-def main() -> None:
-    args = parse_args()
+def parse_args() -> argparse.Namespace:
+    return _build_parser().parse_args()
+
+
+def _coerce_args(args: argparse.Namespace | None) -> argparse.Namespace:
+    """Ensure ``args`` carries every attribute the implementation expects.
+
+    The unified ``evm-scan`` CLI builds its own argparse namespace (see
+    ``evm_wallet_scanner.cli``) which historically omitted a few transfer-only
+    flags (``--broadcast``, ``--confirm``, ``--amount-raw``, ``--send-all``,
+    ``--receipt-confirmations``). Filling in defaults here keeps the
+    standalone module callable and prevents ``AttributeError`` when the
+    orchestrator forwards a partial namespace.
+    """
+    if args is None:
+        args = parse_args()
+    defaults: dict[str, Any] = {
+        "token_address": None,
+        "token_decimals": None,
+        "amount": None,
+        "amount_raw": None,
+        "send_all": False,
+        "rpc_url": None,
+        "gas_limit": None,
+        "gas_price": None,
+        "private_key": None,
+        "broadcast": False,
+        "confirm": None,
+        "receipt_confirmations": 1,
+        "output": None,
+    }
+    for key, value in defaults.items():
+        if not hasattr(args, key):
+            setattr(args, key, value)
+    return args
+
+
+def main(args: argparse.Namespace | None = None) -> None:
+    args = _coerce_args(args)
     try:
         chain = normalize_chain(args.chain)
         sender = validate_address(args.sender, "from")
@@ -284,7 +335,11 @@ def main() -> None:
             tx_hash = broadcast_result.get("transactionHash", "")
             if tx_hash:
                 response["transactionHash"] = tx_hash
-                receipt = get_transaction_receipt(tx_hash, rpc_url)
+                receipt = wait_for_transaction_receipt(
+                    tx_hash,
+                    rpc_url,
+                    confirmations=max(1, int(args.receipt_confirmations)),
+                )
                 response["receipt"] = receipt
                 response["success"] = receipt_succeeded(receipt)
                 after = capture_balances(sender=sender, receiver=receiver, token=token, rpc_url=rpc_url)

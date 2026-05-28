@@ -91,9 +91,16 @@ evm-scan gas-report --chain ethereum --wallet 0x...
 # Transaction status
 evm-scan tx-status --chain base --tx-hash 0x...
 
-# Transfer (dry-run — no signing)
-evm-scan transfer --chain ethereum --wallet 0x... --to 0x... --amount 0.01 --token ETH --dry-run
+# Transfer — dry-run (default; no signing, no broadcast)
+evm-scan transfer --chain ethereum --from 0xSENDER --to 0xRECIPIENT --amount 0.01
+
+# Transfer — broadcast (requires --confirm to match the printed phrase)
+evm-scan transfer --chain ethereum --from 0xSENDER --to 0xRECIPIENT --amount 0.01 \
+  --broadcast --confirm "TRANSFER ethereum ETH 0.01 TO 0xRECIPIENT"
 ```
+
+> Broadcasting requires the optional `signer` extra: `pip install "evm-wallet-scanner[signer]"`.
+> Provide the private key via the `HOT_WALLET_PRIVATE_KEY` (or `PRIVATE_KEY`) env var; `--private-key` is supported but leaks the key into the process list, so it is discouraged.
 
 ### Example Output
 

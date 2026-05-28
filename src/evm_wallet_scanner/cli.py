@@ -122,6 +122,10 @@ def main() -> None:
     p.set_defaults(func=lambda a: tx_status_main())
 
     # ── transfer ──
+    # Mirror the full surface of ``evm_wallet_scanner.transfer.wallet_transfer``
+    # so the orchestrator can drive --broadcast / --confirm without users
+    # being told to call a second CLI. ``dry-run`` is the implicit default
+    # because broadcasting requires both ``--broadcast`` and ``--confirm``.
     p = sub.add_parser("transfer", help="Send native or ERC20 tokens (dry-run by default)")
     p.add_argument("--chain", required=True, help="Chain key")
     p.add_argument("--from", dest="sender", required=True, help="Sender address")
@@ -129,13 +133,19 @@ def main() -> None:
     p.add_argument("--token", default="NATIVE", help="NATIVE or ERC20 symbol/address")
     p.add_argument("--token-address", help="Arbitrary ERC20 address")
     p.add_argument("--token-decimals", type=int)
-    p.add_argument("--amount", default="0", help="Amount to send")
-    p.add_argument("--dry-run", action="store_true", default=True, help="Dry-run (default)")
+    amount_group = p.add_mutually_exclusive_group(required=False)
+    amount_group.add_argument("--amount", help="Human-readable amount (e.g. 0.01)")
+    amount_group.add_argument("--amount-raw", help="Raw uint256 amount")
+    amount_group.add_argument("--send-all", action="store_true", help="Send the entire balance")
     p.add_argument("--gas-limit", help="Gas limit override")
     p.add_argument("--gas-price", help="Gas price in wei")
-    p.add_argument("--private-key", help="Signer private key (or set env var)")
+    p.add_argument("--private-key", help="Signer private key (prefer env var)")
+    p.add_argument("--broadcast", action="store_true", help="Actually broadcast (otherwise dry-run)")
+    p.add_argument("--confirm", help="Must match the confirmation phrase to broadcast")
+    p.add_argument("--receipt-confirmations", type=int, default=1)
+    p.add_argument("--rpc-url", help="Override RPC URL")
     p.add_argument("--output", help="Write JSON output to file")
-    p.set_defaults(func=lambda a: transfer_main())
+    p.set_defaults(func=lambda a: transfer_main(a))
 
     args = parser.parse_args()
     if not args.command:
