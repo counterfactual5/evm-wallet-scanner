@@ -15,6 +15,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
+from evm_wallet_scanner import policy as _policy
 from evm_wallet_scanner import state_machine
 from evm_wallet_scanner.audit import (
     EVENT_BROADCAST,
@@ -367,6 +368,31 @@ def main(args: argparse.Namespace | None = None) -> None:
                         "token": token.get("symbol"),
                         "amount": human_amount,
                     },
+                )
+
+            # ── policy gate (PREFLIGHT → SIGNED) ──
+            pol = _policy.load_policy()
+            policy_ctx = {
+                "amount": human_amount,
+                "chain": chain.key,
+                "sender": sender,
+                "receiver": receiver,
+                "gas_price_gwei": str(Decimal(gas_price) / Decimal(10**9)) if gas_price else None,
+            }
+            policy_result = _policy.check(pol, policy_ctx)
+            response["policyCheck"] = policy_result.to_dict()
+            if not policy_result.allowed:
+                state_machine.transition(run_id, state_machine.STATE_FAILED,
+                                         payload={"policy_violations": policy_result.to_dict()["violations"]})
+                log_event(
+                    event=EVENT_ERROR,
+                    chain=chain.key,
+                    wallet=sender,
+                    error_code="policy_rejected",
+                    details={"violations": policy_result.to_dict()["violations"]},
+                )
+                raise RuntimeError(
+                    f"Policy rejected: {'; '.join(v.message for v in policy_result.violations)}"
                 )
 
             pre_broadcast = capture_balances(sender=sender, receiver=receiver, token=token, rpc_url=rpc_url)
