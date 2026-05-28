@@ -13,7 +13,7 @@ class TestImports(unittest.TestCase):
 
     def test_import_package(self):
         import evm_wallet_scanner
-        self.assertEqual(evm_wallet_scanner.__version__, "0.1.0")
+        self.assertEqual(evm_wallet_scanner.__version__, "0.1.1")
 
     def test_import_chains(self):
         from evm_wallet_scanner.chains import CHAINS, CHAIN_BY_ID, normalize_chain
