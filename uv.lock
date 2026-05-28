@@ -559,7 +559,7 @@ wheels = [
 
 [[package]]
 name = "evm-wallet-scanner"
-version = "0.5.0"
+version = "0.5.2"
 source = { editable = "." }
 
 [package.optional-dependencies]
