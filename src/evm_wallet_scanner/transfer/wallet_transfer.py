@@ -10,10 +10,12 @@ import argparse
 import json
 import os
 import sys
+import time
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
+from evm_wallet_scanner import state_machine
 from evm_wallet_scanner.audit import (
     EVENT_BROADCAST,
     EVENT_CONFIRM,
@@ -22,10 +24,13 @@ from evm_wallet_scanner.audit import (
     log_event,
 )
 from evm_wallet_scanner.common import (
+    _SELECTOR_TRANSFER,
+    _encode_address,
+    _encode_uint256,
+    _json_rpc,
     dump_json,
     estimate_transaction_gas,
     format_units,
-    wait_for_transaction_receipt,
     normalize_chain,
     query_erc20_balance,
     query_gas_price,
@@ -36,10 +41,7 @@ from evm_wallet_scanner.common import (
     resolve_query_token,
     resolve_rpc_url,
     validate_address,
-    _SELECTOR_TRANSFER,
-    _encode_address,
-    _encode_uint256,
-    _json_rpc,
+    wait_for_transaction_receipt,
 )
 
 PRIVATE_KEY_ENV_CANDIDATES = ("HOT_WALLET_PRIVATE_KEY", "PRIVATE_KEY")
@@ -102,7 +104,11 @@ def build_tx_fields(*, sender: str, receiver: str, token: dict[str, Any], raw_am
 
 
 def capture_balances(
-    *, sender: str, receiver: str, token: dict[str, Any], rpc_url: str,
+    *,
+    sender: str,
+    receiver: str,
+    token: dict[str, Any],
+    rpc_url: str,
 ) -> dict[str, int]:
     sender_native = query_native_balance(sender, rpc_url)
     receiver_native = query_native_balance(receiver, rpc_url)
@@ -150,8 +156,7 @@ def sign_and_broadcast(
         from eth_account import Account
     except ImportError:
         raise ImportError(
-            "eth-account is required for signing transactions. "
-            "Install with: pip install evm-wallet-scanner[signer]"
+            "eth-account is required for signing transactions. Install with: pip install evm-wallet-scanner[signer]"
         )
 
     account = Account.from_key(private_key)
@@ -241,8 +246,10 @@ def main(args: argparse.Namespace | None = None) -> None:
         receiver = validate_address(args.receiver, "to")
         rpc_url, rpc_candidates = resolve_rpc_url(args.rpc_url, chain.chain_id)
         token = resolve_transfer_token(
-            chain_key=chain.key, rpc_url=rpc_url,
-            token_name=args.token, token_address=args.token_address,
+            chain_key=chain.key,
+            rpc_url=rpc_url,
+            token_name=args.token,
+            token_address=args.token_address,
             token_decimals=args.token_decimals,
         )
         decimals = int(token["decimals"])
@@ -259,14 +266,17 @@ def main(args: argparse.Namespace | None = None) -> None:
 
         native_balance_raw = query_native_balance(sender, rpc_url)
         token_balance_raw = (
-            native_balance_raw if token["address"] == "NATIVE"
+            native_balance_raw
+            if token["address"] == "NATIVE"
             else query_erc20_balance(sender, str(token["address"]), rpc_url)
         )
 
         if args.send_all:
             if token["address"] == "NATIVE":
                 provisional_tx = build_tx_fields(sender=sender, receiver=receiver, token=token, raw_amount=1)
-                estimated_gas = int(args.gas_limit, 0) if args.gas_limit else estimate_transaction_gas(provisional_tx, rpc_url)
+                estimated_gas = (
+                    int(args.gas_limit, 0) if args.gas_limit else estimate_transaction_gas(provisional_tx, rpc_url)
+                )
                 raw_amount = native_balance_raw - estimated_gas * gas_price
                 if raw_amount <= 0:
                     raise RuntimeError("insufficient native balance to pay gas for --send-all")
@@ -330,6 +340,24 @@ def main(args: argparse.Namespace | None = None) -> None:
         if args.broadcast:
             if args.confirm != confirmation:
                 raise ValueError(f"--confirm must exactly equal: {confirmation}")
+            run_id = (
+                os.environ.get("AUDIT_RUN_ID")
+                or os.environ.get("STAGEFORGE_RUN_ID")
+                or f"tx-{int(time.time())}-{os.getpid()}"
+            )
+            try:
+                state_machine.transition(
+                    run_id,
+                    state_machine.STATE_PREFLIGHT,
+                    payload={
+                        "chain": chain.key,
+                        "wallet": sender,
+                        "token": token.get("symbol"),
+                        "amount": human_amount,
+                    },
+                )
+            except Exception:
+                pass
             pre_broadcast = capture_balances(sender=sender, receiver=receiver, token=token, rpc_url=rpc_url)
             private_key, pk_source = resolve_private_key(args.private_key)
             response["signer"] = {"backend": "eth-account", "source": pk_source}
@@ -345,10 +373,17 @@ def main(args: argparse.Namespace | None = None) -> None:
                     "gasPriceWei": str(gas_price),
                 },
             )
+            try:
+                state_machine.transition(run_id, state_machine.STATE_SIGNED)
+            except Exception:
+                pass
             broadcast_result = sign_and_broadcast(
-                tx_fields=tx_fields, chain_id=chain.chain_id,
-                gas_limit=estimated_gas, gas_price=gas_price,
-                private_key=private_key, rpc_url=rpc_url,
+                tx_fields=tx_fields,
+                chain_id=chain.chain_id,
+                gas_limit=estimated_gas,
+                gas_price=gas_price,
+                private_key=private_key,
+                rpc_url=rpc_url,
             )
             response["broadcastResult"] = broadcast_result
             tx_hash = broadcast_result.get("transactionHash", "")
@@ -363,6 +398,10 @@ def main(args: argparse.Namespace | None = None) -> None:
                     "asset": token.get("symbol"),
                 },
             )
+            try:
+                state_machine.transition(run_id, state_machine.STATE_BROADCAST, payload={"tx_hash": tx_hash})
+            except Exception:
+                pass
             if tx_hash:
                 response["transactionHash"] = tx_hash
                 receipt = wait_for_transaction_receipt(
@@ -389,12 +428,17 @@ def main(args: argparse.Namespace | None = None) -> None:
                         "status": receipt.get("status"),
                     },
                 )
+                try:
+                    state_machine.transition(run_id, state_machine.STATE_CONFIRMED)
+                except Exception:
+                    pass
         else:
             response["note"] = "dry-run only; pass --broadcast with --confirm to send"
 
         if args.output:
             Path(args.output).write_text(
-                json.dumps(response, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
+                json.dumps(response, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
             )
         dump_json(response)
     except Exception as exc:
@@ -405,6 +449,15 @@ def main(args: argparse.Namespace | None = None) -> None:
             error_code=type(exc).__name__,
             details={"message": str(exc), "action": "wallet_transfer"},
         )
+        try:
+            run_id = (
+                os.environ.get("AUDIT_RUN_ID")
+                or os.environ.get("STAGEFORGE_RUN_ID")
+                or f"tx-{int(time.time())}-{os.getpid()}"
+            )
+            state_machine.transition(run_id, state_machine.STATE_FAILED, payload={"error_code": type(exc).__name__})
+        except Exception:
+            pass
         print(json.dumps({"error": str(exc)}, ensure_ascii=False, indent=2), file=sys.stderr)
         sys.exit(1)
 
