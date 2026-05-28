@@ -66,4 +66,4 @@ uniswap-autopilot:
     - arbitrum
     - optimism
   max_slippage_bps: 300     # 3 % — DEX trades
-  min_output_amount: 0.0    # check_uniswap(): output < this = reject (0 = off)
+  # min_output_amount: 0.0  # check_uniswap(): disabled — set a positive value to enforce
