@@ -5,4 +5,4 @@ counterparty analysis, portfolio valuation, gas reports, and transaction
 status checks for Ethereum and L2 chains.
 """
 
-__version__ = "0.5.0"
+__version__ = "0.5.2"
