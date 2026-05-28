@@ -11,6 +11,7 @@ import json
 import sys
 from typing import Any
 
+from evm_wallet_scanner import policy as _policy
 from evm_wallet_scanner.audit import EVENT_PREFLIGHT, log_event
 from evm_wallet_scanner.doctor.preflight import (
     STATUS_ERROR,
@@ -71,6 +72,24 @@ def doctor_main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Exit non-zero when any check fails (otherwise always 0)",
     )
+    parser.add_argument(
+        "--policy",
+        action="store_true",
+        help="Also load and evaluate the risk-control policy against this context",
+    )
+    parser.add_argument(
+        "--policy-file",
+        help="Explicit policy file path (otherwise POLICY_FILE / ~/.stageforge/policy.{yaml,json})",
+    )
+    parser.add_argument(
+        "--amount",
+        help="Trade amount to test against the policy (only used with --policy)",
+    )
+    parser.add_argument(
+        "--project",
+        default="evm-wallet-scanner",
+        help="Project section to resolve in the policy file (default: evm-wallet-scanner)",
+    )
 
     args = parser.parse_args(argv)
 
@@ -87,6 +106,26 @@ def doctor_main(argv: list[str] | None = None) -> int:
     )
 
     payload: dict[str, Any] = report.to_dict()
+
+    policy_ok = True
+    if args.policy:
+        try:
+            pol = _policy.load_policy(args.policy_file, project=args.project)
+            policy_ctx: dict[str, Any] = {"chain": args.chain, "sender": args.wallet}
+            if args.amount is not None:
+                policy_ctx["amount"] = args.amount
+            result = _policy.check(pol, policy_ctx)
+            payload["policy"] = {
+                "loaded": True,
+                "project": args.project,
+                "context": policy_ctx,
+                **result.to_dict(),
+            }
+            policy_ok = result.allowed
+        except Exception as exc:  # noqa: BLE001 — report config errors, don't crash
+            payload["policy"] = {"loaded": False, "error": str(exc)}
+            policy_ok = False
+
     text = json.dumps(payload, ensure_ascii=False, indent=2)
     if args.output:
         with open(args.output, "w", encoding="utf-8") as fh:
@@ -111,7 +150,7 @@ def doctor_main(argv: list[str] | None = None) -> int:
 
     if args.exit_code:
         bad = [c for c in report.checks if c.status in {STATUS_FAIL, STATUS_ERROR}]
-        if bad:
+        if bad or not policy_ok:
             return 2
         warn = [c for c in report.checks if c.status == STATUS_WARN]
         if warn:

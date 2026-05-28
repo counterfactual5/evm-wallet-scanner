@@ -18,6 +18,12 @@
 
 ---
 
+> [!IMPORTANT]
+> **Trading safety.** Broadcast paths run through a shared risk-control policy
+> (amount caps, chain allow-list, address blacklist, slippage limits) evaluated
+> between the `PREFLIGHT` and `SIGNED` states. Read **[RISK_POLICY.md](RISK_POLICY.md)**
+> and copy `policy.yaml` to `~/.stageforge/policy.yaml` before going live.
+
 ## ⚡ Quick Start
 
 ```bash

@@ -215,5 +215,156 @@ class TestCheckResultSerialization(unittest.TestCase):
         json.dumps(d)
 
 
+class TestDoctorPolicyFlag(unittest.TestCase):
+    """`evm-scan doctor --policy` evaluates the policy file against the context."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory()
+        policy_data = {"evm-wallet-scanner": {"max_amount": 100, "allowed_chains": ["ethereum"]}}
+        self._policy_path = os.path.join(self._tmpdir.name, "policy.json")
+        with open(self._policy_path, "w", encoding="utf-8") as fh:
+            json.dump(policy_data, fh)
+        self._out_path = os.path.join(self._tmpdir.name, "report.json")
+
+    def tearDown(self) -> None:
+        self._tmpdir.cleanup()
+
+    def _fake_report(self):
+        from evm_wallet_scanner.doctor.preflight import PreflightCheck, PreflightReport
+
+        return PreflightReport(
+            ok=True,
+            chain="ethereum",
+            chain_id=1,
+            wallet="0xabc",
+            rpc_url="https://rpc.example.com",
+            checks=[PreflightCheck(name="rpc_reachable", status="ok", summary="ok")],
+            started_at=0.0,
+            finished_at=0.1,
+        )
+
+    def test_policy_rejects_over_limit(self) -> None:
+        from unittest.mock import patch
+
+        from evm_wallet_scanner.doctor.cli import doctor_main
+
+        argv = [
+            "--chain", "ethereum", "--wallet", "0xabc",
+            "--policy", "--policy-file", self._policy_path,
+            "--amount", "500", "--output", self._out_path,
+            "--exit-code",
+        ]
+        with patch("evm_wallet_scanner.doctor.cli.run_preflight", return_value=self._fake_report()):
+            rc = doctor_main(argv)
+
+        with open(self._out_path, encoding="utf-8") as fh:
+            payload = json.load(fh)
+
+        self.assertIn("policy", payload)
+        self.assertTrue(payload["policy"]["loaded"])
+        self.assertFalse(payload["policy"]["allowed"])
+        self.assertEqual(rc, 2, "policy rejection should drive exit code 2")
+
+    def test_policy_allows_within_limit(self) -> None:
+        from unittest.mock import patch
+
+        from evm_wallet_scanner.doctor.cli import doctor_main
+
+        argv = [
+            "--chain", "ethereum", "--wallet", "0xabc",
+            "--policy", "--policy-file", self._policy_path,
+            "--amount", "10", "--output", self._out_path,
+        ]
+        with patch("evm_wallet_scanner.doctor.cli.run_preflight", return_value=self._fake_report()):
+            doctor_main(argv)
+
+        with open(self._out_path, encoding="utf-8") as fh:
+            payload = json.load(fh)
+
+        self.assertTrue(payload["policy"]["allowed"])
+        self.assertEqual(payload["policy"]["violations"], [])
+
+
+class TestPolicyGateE2E(unittest.TestCase):
+    """End-to-end: a real policy file loaded through wallet_transfer.main blocks
+    a transfer over the limit and never reaches sign_and_broadcast."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory()
+        os.environ["STAGEFORGE_STATE_DIR"] = self._tmpdir.name
+        self.run_id = "policy-gate-e2e-001"
+
+        # Policy file that rejects any transfer above 0.05.
+        policy_data = {"evm-wallet-scanner": {"max_amount": 0.05}}
+        self._policy_path = os.path.join(self._tmpdir.name, "policy.json")
+        with open(self._policy_path, "w", encoding="utf-8") as fh:
+            json.dump(policy_data, fh)
+
+        os.environ["POLICY_FILE"] = self._policy_path
+        os.environ["AUDIT_RUN_ID"] = self.run_id
+
+    def tearDown(self) -> None:
+        self._tmpdir.cleanup()
+        os.environ.pop("STAGEFORGE_STATE_DIR", None)
+        os.environ.pop("POLICY_FILE", None)
+        os.environ.pop("AUDIT_RUN_ID", None)
+
+    def test_over_limit_transfer_blocked_before_broadcast(self) -> None:
+        from argparse import Namespace
+        from unittest.mock import patch
+
+        from evm_wallet_scanner import state_machine
+
+        args = Namespace(
+            chain="ethereum",
+            sender="0x1111111111111111111111111111111111111111",
+            receiver="0x2222222222222222222222222222222222222222",
+            token="NATIVE",
+            token_address=None,
+            token_decimals=None,
+            amount="0.1",  # exceeds policy max_amount 0.05
+            amount_raw=None,
+            send_all=False,
+            rpc_url="https://rpc.example.com",
+            gas_limit=None,
+            gas_price="1",
+            private_key="0x" + "11" * 32,
+            broadcast=True,
+            confirm="TRANSFER ethereum ETH 0.1 TO 0x2222222222222222222222222222222222222222",
+            receipt_confirmations=1,
+            output=None,
+        )
+
+        with (
+            patch("evm_wallet_scanner.transfer.wallet_transfer.normalize_chain") as mock_chain,
+            patch("evm_wallet_scanner.transfer.wallet_transfer.resolve_rpc_url",
+                  return_value=("https://rpc.example.com", [])),
+            patch("evm_wallet_scanner.transfer.wallet_transfer.resolve_transfer_token",
+                  return_value={"symbol": "ETH", "address": "NATIVE", "decimals": 18}),
+            patch("evm_wallet_scanner.transfer.wallet_transfer.query_native_balance",
+                  return_value=10**19),
+            patch("evm_wallet_scanner.transfer.wallet_transfer.estimate_transaction_gas",
+                  return_value=21000),
+            patch("evm_wallet_scanner.transfer.wallet_transfer.sign_and_broadcast") as mock_broadcast,
+            patch("evm_wallet_scanner.transfer.wallet_transfer.dump_json"),
+            patch("evm_wallet_scanner.transfer.wallet_transfer.capture_balances",
+                  return_value={"senderNative": 10**19, "receiverNative": 0,
+                                "senderAsset": 10**19, "receiverAsset": 0}),
+        ):
+            mock_chain.return_value = type("Chain", (), {"key": "ethereum", "chain_id": 1})()
+            from evm_wallet_scanner.transfer import wallet_transfer
+
+            # main() catches the RuntimeError and exits non-zero.
+            with self.assertRaises(SystemExit):
+                wallet_transfer.main(args)
+
+            mock_broadcast.assert_not_called()
+
+        # State machine should have recorded the rejection as terminal FAILED.
+        state = state_machine.load_state(self.run_id)
+        self.assertIsNotNone(state)
+        self.assertEqual(state["current_state"], state_machine.STATE_FAILED)
+
+
 if __name__ == "__main__":
     unittest.main()
