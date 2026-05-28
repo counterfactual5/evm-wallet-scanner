@@ -345,7 +345,19 @@ def main(args: argparse.Namespace | None = None) -> None:
                 or os.environ.get("STAGEFORGE_RUN_ID")
                 or f"tx-{int(time.time())}-{os.getpid()}"
             )
-            try:
+
+            # ── preflight ──
+            action = state_machine.next_action(run_id)
+            if action is None:
+                log_event(
+                    event=EVENT_ERROR,
+                    chain=chain.key,
+                    wallet=sender,
+                    error_code="state_terminal",
+                    details={"message": f"run {run_id} terminal — cannot proceed"},
+                )
+                raise RuntimeError(f"run {run_id} is in terminal state")
+            if action == state_machine.STATE_PREFLIGHT:
                 state_machine.transition(
                     run_id,
                     state_machine.STATE_PREFLIGHT,
@@ -356,82 +368,107 @@ def main(args: argparse.Namespace | None = None) -> None:
                         "amount": human_amount,
                     },
                 )
-            except Exception:
-                pass
+
             pre_broadcast = capture_balances(sender=sender, receiver=receiver, token=token, rpc_url=rpc_url)
             private_key, pk_source = resolve_private_key(args.private_key)
             response["signer"] = {"backend": "eth-account", "source": pk_source}
-            log_event(
-                event=EVENT_SIGN,
-                chain=chain.key,
-                wallet=sender,
-                details={
-                    "to": tx_fields["to"],
-                    "rawAmount": str(raw_amount),
-                    "asset": token.get("symbol"),
-                    "gasLimit": estimated_gas,
-                    "gasPriceWei": str(gas_price),
-                },
-            )
-            try:
-                state_machine.transition(run_id, state_machine.STATE_SIGNED)
-            except Exception:
-                pass
-            broadcast_result = sign_and_broadcast(
-                tx_fields=tx_fields,
-                chain_id=chain.chain_id,
-                gas_limit=estimated_gas,
-                gas_price=gas_price,
-                private_key=private_key,
-                rpc_url=rpc_url,
-            )
-            response["broadcastResult"] = broadcast_result
-            tx_hash = broadcast_result.get("transactionHash", "")
-            log_event(
-                event=EVENT_BROADCAST,
-                chain=chain.key,
-                wallet=sender,
-                tx_hash=tx_hash or None,
-                details={
-                    "to": tx_fields["to"],
-                    "rawAmount": str(raw_amount),
-                    "asset": token.get("symbol"),
-                },
-            )
-            try:
-                state_machine.transition(run_id, state_machine.STATE_BROADCAST, payload={"tx_hash": tx_hash})
-            except Exception:
-                pass
-            if tx_hash:
-                response["transactionHash"] = tx_hash
-                receipt = wait_for_transaction_receipt(
-                    tx_hash,
-                    rpc_url,
-                    confirmations=max(1, int(args.receipt_confirmations)),
-                )
-                response["receipt"] = receipt
-                response["success"] = receipt_succeeded(receipt)
-                after = capture_balances(sender=sender, receiver=receiver, token=token, rpc_url=rpc_url)
-                response["balanceCheck"] = {
-                    "before": {k: str(v) for k, v in pre_broadcast.items()},
-                    "after": {k: str(v) for k, v in after.items()},
-                    "delta": {k: str(after[k] - pre_broadcast[k]) for k in pre_broadcast},
-                }
+
+            # ── sign + broadcast ──
+            action = state_machine.next_action(run_id)
+            if action in (state_machine.STATE_SIGNED, state_machine.STATE_BROADCAST):
                 log_event(
-                    event=EVENT_CONFIRM,
+                    event=EVENT_SIGN,
                     chain=chain.key,
                     wallet=sender,
-                    tx_hash=tx_hash,
-                    error_code=None if response["success"] else "receipt_failed",
                     details={
-                        "confirmations": max(1, int(args.receipt_confirmations)),
-                        "status": receipt.get("status"),
+                        "to": tx_fields["to"],
+                        "rawAmount": str(raw_amount),
+                        "asset": token.get("symbol"),
+                        "gasLimit": estimated_gas,
+                        "gasPriceWei": str(gas_price),
                     },
                 )
-                try:
+                state_machine.transition(run_id, state_machine.STATE_SIGNED)
+                broadcast_result = sign_and_broadcast(
+                    tx_fields=tx_fields,
+                    chain_id=chain.chain_id,
+                    gas_limit=estimated_gas,
+                    gas_price=gas_price,
+                    private_key=private_key,
+                    rpc_url=rpc_url,
+                )
+                response["broadcastResult"] = broadcast_result
+                tx_hash = broadcast_result.get("transactionHash", "")
+                response["transactionHash"] = tx_hash
+                log_event(
+                    event=EVENT_BROADCAST,
+                    chain=chain.key,
+                    wallet=sender,
+                    tx_hash=tx_hash or None,
+                    details={"to": tx_fields["to"], "rawAmount": str(raw_amount), "asset": token.get("symbol")},
+                )
+                state_machine.transition(run_id, state_machine.STATE_BROADCAST, payload={"tx_hash": tx_hash})
+            elif action == state_machine.STATE_CONFIRMED:
+                # Sign+broadcast already done — recover tx_hash from saved state.
+                state_ = state_machine.load_state(run_id)
+                tx_hash = (state_ or {}).get("payload", {}).get("tx_hash", "") if state_ else ""
+                response["transactionHash"] = tx_hash
+                response["broadcastResult"] = {"transactionHash": tx_hash}
+            elif action is None:
+                log_event(
+                    event=EVENT_ERROR,
+                    chain=chain.key,
+                    wallet=sender,
+                    error_code="state_terminal",
+                    details={"message": f"run {run_id} terminal — cannot sign/broadcast"},
+                )
+                raise RuntimeError(f"run {run_id} is in terminal state")
+            else:
+                # action > BROADCAST but not CONFIRMED — shouldn't happen in current schema.
+                tx_hash = ""
+
+            # ── confirm ──
+            if tx_hash:
+                action = state_machine.next_action(run_id)
+                if action == state_machine.STATE_CONFIRMED:
+                    receipt = wait_for_transaction_receipt(
+                        tx_hash,
+                        rpc_url,
+                        confirmations=max(1, int(args.receipt_confirmations)),
+                    )
+                    response["receipt"] = receipt
+                    response["success"] = receipt_succeeded(receipt)
+                    after = capture_balances(sender=sender, receiver=receiver, token=token, rpc_url=rpc_url)
+                    response["balanceCheck"] = {
+                        "before": {k: str(v) for k, v in pre_broadcast.items()},
+                        "after": {k: str(v) for k, v in after.items()},
+                        "delta": {k: str(after[k] - pre_broadcast[k]) for k in pre_broadcast},
+                    }
+                    log_event(
+                        event=EVENT_CONFIRM,
+                        chain=chain.key,
+                        wallet=sender,
+                        tx_hash=tx_hash,
+                        error_code=None if response["success"] else "receipt_failed",
+                        details={
+                            "confirmations": max(1, int(args.receipt_confirmations)),
+                            "status": receipt.get("status"),
+                        },
+                    )
                     state_machine.transition(run_id, state_machine.STATE_CONFIRMED)
-                except Exception:
+                elif action is None:
+                    # Already confirmed — idempotent, nothing to do.
                     pass
+                else:
+                    log_event(
+                        event=EVENT_ERROR,
+                        chain=chain.key,
+                        wallet=sender,
+                        error_code="state_unexpected",
+                        details={"message": f"unexpected next_action={action!r} for confirm phase", "run_id": run_id},
+                    )
+            else:
+                response["note"] = "broadcast skipped (already confirmed or no tx_hash)"
         else:
             response["note"] = "dry-run only; pass --broadcast with --confirm to send"
 
@@ -457,6 +494,8 @@ def main(args: argparse.Namespace | None = None) -> None:
             )
             state_machine.transition(run_id, state_machine.STATE_FAILED, payload={"error_code": type(exc).__name__})
         except Exception:
+            # State machine failure must never block the trade error exit.
+            # The outer audit event already captured the trade error.
             pass
         print(json.dumps({"error": str(exc)}, ensure_ascii=False, indent=2), file=sys.stderr)
         sys.exit(1)
