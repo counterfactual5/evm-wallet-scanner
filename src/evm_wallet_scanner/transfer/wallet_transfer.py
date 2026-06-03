@@ -256,6 +256,13 @@ def main(args: argparse.Namespace | None = None) -> None:
         )
         decimals = int(token["decimals"])
 
+        # run_id available early for preflight audit events
+        run_id = (
+            os.environ.get("AUDIT_RUN_ID")
+            or os.environ.get("STAGEFORGE_RUN_ID")
+            or f"tx-{int(time.time())}-{os.getpid()}"
+        )
+
         if not any([args.amount is not None, args.amount_raw is not None, args.send_all]):
             raise ValueError("one of --amount / --amount-raw / --send-all is required")
 
@@ -281,6 +288,14 @@ def main(args: argparse.Namespace | None = None) -> None:
                 )
                 raw_amount = native_balance_raw - estimated_gas * gas_price
                 if raw_amount <= 0:
+                    log_event(
+                        event=EVENT_ERROR,
+                        chain=chain.key,
+                        wallet=sender,
+                        run_id=run_id,
+                        error_code="no_gas",
+                        details={"native_balance": native_balance_raw, "estimated_fee": estimated_gas * gas_price},
+                    )
                     raise RuntimeError("insufficient native balance to pay gas for --send-all")
             else:
                 raw_amount = token_balance_raw
@@ -295,7 +310,19 @@ def main(args: argparse.Namespace | None = None) -> None:
 
         human_amount = format_units(raw_amount, decimals)
         tx_fields = build_tx_fields(sender=sender, receiver=receiver, token=token, raw_amount=raw_amount)
-        estimated_gas = int(args.gas_limit, 0) if args.gas_limit else estimate_transaction_gas(tx_fields, rpc_url)
+        try:
+            estimated_gas = int(args.gas_limit, 0) if args.gas_limit else estimate_transaction_gas(tx_fields, rpc_url)
+        except Exception as exc:
+            reason = str(getattr(exc, "args", [str(exc)])[0])
+            log_event(
+                event=EVENT_ERROR,
+                chain=chain.key,
+                wallet=sender,
+                run_id=run_id,
+                error_code="simulation_failed",
+                details={"to": tx_fields.get("to"), "value": str(tx_fields.get("value", 0)), "revert": reason},
+            )
+            raise RuntimeError(f"Gas estimation failed (tx would revert): {reason}") from exc
         if estimated_gas <= 0:
             raise RuntimeError("failed to estimate gas")
         estimated_fee_wei = estimated_gas * gas_price
@@ -303,11 +330,27 @@ def main(args: argparse.Namespace | None = None) -> None:
         # Balance checks
         if token["address"] == "NATIVE":
             if raw_amount + estimated_fee_wei > native_balance_raw:
+                log_event(
+                    event=EVENT_ERROR,
+                    chain=chain.key,
+                    wallet=sender,
+                    run_id=run_id,
+                    error_code="no_gas",
+                    details={"native_balance": native_balance_raw, "required": raw_amount + estimated_fee_wei},
+                )
                 raise RuntimeError("insufficient native balance for amount + gas")
         else:
             if raw_amount > token_balance_raw:
                 raise RuntimeError("insufficient token balance")
             if estimated_fee_wei > native_balance_raw:
+                log_event(
+                    event=EVENT_ERROR,
+                    chain=chain.key,
+                    wallet=sender,
+                    run_id=run_id,
+                    error_code="no_gas",
+                    details={"native_balance": native_balance_raw, "estimated_fee": estimated_fee_wei},
+                )
                 raise RuntimeError("insufficient native balance to pay gas")
 
         confirmation = build_confirmation_phrase(chain.key, str(token["symbol"]), human_amount, receiver)
@@ -342,11 +385,6 @@ def main(args: argparse.Namespace | None = None) -> None:
         if args.broadcast:
             if args.confirm != confirmation:
                 raise ValueError(f"--confirm must exactly equal: {confirmation}")
-            run_id = (
-                os.environ.get("AUDIT_RUN_ID")
-                or os.environ.get("STAGEFORGE_RUN_ID")
-                or f"tx-{int(time.time())}-{os.getpid()}"
-            )
 
             # ── preflight ──
             action = state_machine.next_action(run_id)
@@ -383,8 +421,11 @@ def main(args: argparse.Namespace | None = None) -> None:
             policy_result = _policy.check(pol, policy_ctx)
             response["policyCheck"] = policy_result.to_dict()
             if not policy_result.allowed:
-                state_machine.transition(run_id, state_machine.STATE_FAILED,
-                                         payload={"policy_violations": policy_result.to_dict()["violations"]})
+                state_machine.transition(
+                    run_id,
+                    state_machine.STATE_FAILED,
+                    payload={"policy_violations": policy_result.to_dict()["violations"]},
+                )
                 log_event(
                     event=EVENT_ERROR,
                     chain=chain.key,
@@ -392,9 +433,7 @@ def main(args: argparse.Namespace | None = None) -> None:
                     error_code="policy_rejected",
                     details={"violations": policy_result.to_dict()["violations"]},
                 )
-                raise RuntimeError(
-                    f"Policy rejected: {'; '.join(v.message for v in policy_result.violations)}"
-                )
+                raise RuntimeError(f"Policy rejected: {'; '.join(v.message for v in policy_result.violations)}")
             if policy_result.warnings:
                 log_event(
                     event=EVENT_PREFLIGHT,
