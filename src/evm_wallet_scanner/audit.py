@@ -72,7 +72,7 @@ REQUIRED_KEYS: tuple[str, ...] = (
 
 
 _write_lock = threading.Lock()
-_DEFAULT_PROJECT = "evm-wallet-scanner"
+_DEFAULT_PROJECT = __name__.split(".")[0].replace("_", "-")
 
 
 def _now() -> tuple[str, float]:
