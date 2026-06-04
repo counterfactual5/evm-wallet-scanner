@@ -7,7 +7,6 @@ import json
 import sys
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-UTC = timezone.utc
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -23,6 +22,8 @@ from evm_wallet_scanner.common import (
     require_etherscan_api_key,
     validate_address,
 )
+
+UTC = timezone.utc
 
 
 def parse_args() -> argparse.Namespace:
