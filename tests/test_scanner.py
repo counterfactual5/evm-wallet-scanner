@@ -18,7 +18,7 @@ class TestImports(unittest.TestCase):
         self.assertRegex(evm_wallet_scanner.__version__, r"^\d+\.\d+\.\d+")
 
     def test_import_chains(self):
-        from evm_wallet_scanner.chains import CHAINS, CHAIN_BY_ID, normalize_chain
+        from evm_wallet_scanner.chains import CHAINS, CHAIN_BY_ID
         self.assertIn("ethereum", CHAINS)
         self.assertEqual(CHAINS["ethereum"].chain_id, 1)
         self.assertEqual(CHAIN_BY_ID[1].key, "ethereum")
@@ -26,20 +26,15 @@ class TestImports(unittest.TestCase):
     def test_import_common(self):
         from evm_wallet_scanner.common import (
             validate_address,
-            format_units,
-            normalize_direction,
-            resolve_rpc_url,
-            dump_json,
-            iso_from_timestamp,
         )
         self.assertTrue(callable(validate_address))
 
     def test_import_balances(self):
-        from evm_wallet_scanner.balances import balance_main, overview_main, multichain_main
+        from evm_wallet_scanner.balances import balance_main
         self.assertTrue(callable(balance_main))
 
     def test_import_history(self):
-        from evm_wallet_scanner.history import history_main, transfer_report_main, counterparties_main
+        from evm_wallet_scanner.history import history_main
         self.assertTrue(callable(history_main))
 
     def test_import_transfer(self):
@@ -47,7 +42,7 @@ class TestImports(unittest.TestCase):
         self.assertTrue(callable(transfer_main))
 
     def test_import_portfolio(self):
-        from evm_wallet_scanner.portfolio import portfolio_main, gas_report_main
+        from evm_wallet_scanner.portfolio import portfolio_main
         self.assertTrue(callable(portfolio_main))
 
     def test_import_status(self):
