@@ -13,11 +13,12 @@ import time
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
-UTC = timezone.utc
 from decimal import Decimal
 from typing import Any
 
 from evm_wallet_scanner.chains import CHAIN_BY_ID, CHAINS, ChainInfo, normalize_chain
+
+UTC = timezone.utc
 
 # ── Constants ──────────────────────────────────────────────────────────────
 
@@ -453,3 +454,24 @@ def build_balance_entry(
         "rpcUrlResolved": rpc_url,
         "rpcEnvCandidates": rpc_candidates,
     }
+
+
+__all__ = [
+    # re-exported from chains
+    "CHAIN_BY_ID", "CHAINS", "ChainInfo", "normalize_chain",
+    # constants
+    "UTC", "ADDRESS_RE", "GLOBAL_RPC_ENV_CANDIDATES",
+    "ETHERSCAN_API_URL", "ETHERSCAN_EMPTY_RESULT_MESSAGES",
+    # rpc
+    "resolve_rpc_url", "rpc_env_candidates",
+    "query_native_balance", "query_erc20_balance", "query_erc20_allowance",
+    "query_token_decimals", "query_token_symbol",
+    "estimate_transaction_gas", "query_gas_price",
+    "get_transaction_receipt", "wait_for_transaction_receipt", "receipt_succeeded",
+    # etherscan
+    "require_etherscan_api_key", "etherscan_request", "get_block_by_timestamp",
+    # formatting / helpers
+    "format_units", "iso_from_timestamp", "dump_json",
+    "validate_address", "normalize_direction",
+    "resolve_query_token", "build_balance_entry",
+]
