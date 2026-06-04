@@ -12,11 +12,9 @@ import os
 import sys
 
 from evm_wallet_scanner.common import (
-    dump_json,
     etherscan_request,
     format_units,
     iso_from_timestamp,
-    normalize_chain,
     validate_address,
 )
 from evm_wallet_scanner.chains import normalize_chain

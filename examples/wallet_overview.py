@@ -10,7 +10,7 @@ Environment:
 
 import sys
 
-from evm_wallet_scanner.common import build_balance_entry, dump_json
+from evm_wallet_scanner.common import build_balance_entry
 from evm_wallet_scanner.chains import normalize_chain
 
 # Common tokens to check per chain
